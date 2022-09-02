@@ -1,0 +1,523 @@
+---
+title: "Step4_Model Selection GLMMs"
+author: "Billy Geary"
+date: "16/09/2021"
+output: html_document
+---
+
+# SETUP
+Analysis document for Upper Warren dynamic occupancy models for feral cat and red fox in response to a range of covariates, mostly rain, baiting intensity and distance to ag. 
+
+```{r setup, include=TRUE, message=FALSE, warning=FALSE}
+library(unmarked)
+library(dplyr)
+library(lme4)
+library(ggplot2)
+library(cowplot)
+library(ggeffects)
+library(MuMIn)
+```
+
+
+## Load the Unmarked Occupancy Frames
+
+```{r, message=FALSE, warning=FALSE}
+load("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Data_Clean/foxes.umf.16092021.Rda")
+load("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Data_Clean/cats.umf.16092021.Rda")
+
+# Create a year covariate
+foxes.umf@siteCovs$Year = lubridate::year(foxes.umf@siteCovs$Date)
+cats.umf@siteCovs$Year = lubridate::year(cats.umf@siteCovs$Date)
+
+# Create a BACI covariate
+foxes.umf@siteCovs = foxes.umf@siteCovs %>% 
+  mutate(YEAR_GROUPS = ifelse(Year < 2009, "2006_2008",
+                              ifelse(Year >2008 & Year < 2011, "2009_2010", "2011_2013"))) %>% 
+  mutate(Year = as.factor(Year),
+         YEAR_GROUPS = as.factor(YEAR_GROUPS)) 
+         
+summary(foxes.umf)
+
+# Create a BACI covariate
+cats.umf@siteCovs = cats.umf@siteCovs %>% 
+  mutate(YEAR_GROUPS = ifelse(Year < 2009, "2006_2008",
+                              ifelse(Year >2008 & Year < 2011, "2009_2010", "2011_2013"))) %>% 
+  mutate(Year = as.factor(Year),
+         YEAR_GROUPS = as.factor(YEAR_GROUPS)) 
+         
+```
+
+
+## Create RepRate Data Frame
+```{r}
+fox.dat = data.frame(FoxCount =  apply(foxes.umf@y, 1, sum, na.rm=TRUE),
+                     Effort = rowSums(!is.na(foxes.umf@y)))
+fox.dat$FoxRR = fox.dat$FoxCount/fox.dat$Effort
+cat.dat = data.frame(CatCount =  apply(cats.umf@y, 1, sum, na.rm=TRUE))
+
+count.data = cbind(fox.dat, cat.dat, cats.umf@siteCovs)
+count.data$CatRR = count.data$CatCount/count.data$Effort
+
+count.data = filter(count.data, Effort !=0)
+
+count.data$DaysSinceStart = as.numeric(count.data$Date - min(count.data$Date)) 
+```
+
+# Plot Proportion of sites occupied over time
+```{r}
+occ.plot = count.data %>%
+  mutate(FoxPA = ifelse(FoxRR > 0, 1, 0),
+         CatPA = ifelse(CatRR >0, 1, 0)) %>%
+  group_by(Transect, Session) %>% summarise(FoxOcc = sum(FoxPA)/50, CatOcc = sum(CatPA)/50) %>%
+  ggplot() + geom_line(aes(x = Session, y = FoxOcc, colour="Red Fox")) + geom_line(aes(x = Session, y = CatOcc, colour = "Feral Cat")) + 
+  facet_wrap(~Transect) + ylab("Proportion of Sites Occupied") + theme_cowplot() +
+  scale_colour_manual(name = "Species",
+                      labels = c("Feral Cat", "Red Fox"), values=c("#3B528BFF","#5DC863FF")) 
+
+```
+
+# Plot Reporting Rates
+```{r}
+rep.plot = ggplot(count.data) + 
+  geom_point(aes(x=Date, y=FoxRR, colour="Red Fox"), alpha=0.4, position = 'jitter') +
+  geom_point(aes(x=Date, y=CatRR, colour="Feral Cat"), alpha=0.4, position='jitter') +
+  geom_smooth(aes(x=Date, y=FoxRR, fill="Red Fox", colour="Red Fox"), method='gam', 
+              formula=y~s(x, k=5), method.args= list(family='binomial')) +
+  geom_smooth(aes(x=Date, y=CatRR, fill="Feral Cat", colour="Feral Cat"), method='gam', 
+              formula=y~s(x,k=5), method.args= list(family='binomial')) +
+  facet_wrap(~Transect) + ylab("Reporting Rate") +
+  theme_cowplot() +
+  scale_colour_manual(name = "Species",
+                     labels = c("Feral Cat", "Red Fox"), values=c("#3B528BFF","#5DC863FF")) + 
+  scale_fill_manual(name = "Species",
+                     labels = c("Feral Cat", "Red Fox"), values=c("#3B528BFF","#5DC863FF")) 
+
+rep.plot
+
+ggsave("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Outputs/Fig2_reprate.pdf", plot=rep.plot, dpi=600, width=5, height=3, scale =2, units="in")
+```
+
+# Check for coliniarity between covariates
+Dont want to include variables that have a correlation of more than +/-0.5, which looks like we're all good. 
+```{r, message=FALSE, warning=FALSE, fig.width=9}
+cors = count.data %>% 
+  dplyr::select(Rain_TwelveMonths, DistAg, MeanBaitIntensity_Twelve, Prey_Twelve, FoxRR) %>%
+  setNames(c("Precipitation", "DistToAgriculture", "FoxBaitingIntensity", "PreyAbundance", "FoxActivity")) %>%
+  cor(method = "spearman") %>% round(digits=2) %>% as.data.frame() 
+```
+
+
+# RED FOX
+H1: An increase in baiting intensity leads to a decline in foxes 
+H2: A change in baiting intensity to target foxy areas did this
+H3: Foxes are driven by stochastic variation between years which affects the effectiveness of baiting intensity
+H4: Foxes are driven more by prey than by baiting intensity or rainfall
+H5: An increase in baiting intensity leads to a decline in foxes but only in dry years because in wet years foxes are reproducing a lot and new ones are dispersing straight back into the site after foxes are killed 
+
+## Test for temporal autocorrelation
+```{r}
+fox.temp = glmer(cbind(FoxCount, Effort - FoxCount) ~ (1|Site) + (1|Year), data=count.data, family = 'binomial')
+summary(fox.temp)
+E <- residuals(fox.temp)
+I1 <- !is.na(count.data$FoxCount)
+Efull <- vector(length=length(count.data$FoxCount))
+Efull[I1]<-E
+acf(Efull, na.action=na.pass, main="Autocorrelation Plot")
+
+```
+
+```{r}
+cat.temp = glmer(cbind(CatCount, Effort - CatCount) ~ Session + (1|Site) + (1|Year), data=count.data, family = 'binomial')
+summary(cat.temp)
+E <- residuals(cat.temp)
+I1 <- !is.na(count.data$CatCount)
+Efull <- vector(length=length(count.data$CatCount))
+Efull[I1]<-E
+acf(Efull, na.action=na.pass, main="Autocorrelation Plot")
+```
+
+```{r}
+fox.temp = glmer(cbind(FoxCount, Effort - FoxCount) ~ Session + (1|Site), data=count.data, family = 'binomial', correlation = corCompSymm(form=~Session))
+
+fox.gam = mgcv::gam()
+
+
+fox = brm(FoxCount| trials(Effort) ~ (1|Site), data=count.data, family = 'binomial')
+
+fox.global = brm(FoxCount| trials(Effort) ~ 
+                       scale(Rain_TwelveMonths) +
+                       scale(DistAg) +
+                       scale(MeanBaitIntensity_Twelve) +
+                       scale(Prey_Twelve) + (1|Site), data=count.data, family = 'binomial', cores=4)
+
+fox.global.temp = brm(FoxCount| trials(Effort) ~ 
+                       scale(Rain_TwelveMonths) +
+                       scale(MeanBaitIntensity_Twelve) +
+                       scale(Prey_Twelve) + 
+                       arma(time=Session, gr=Site, cov=TRUE), data=count.data, family = 'binomial', cores=4)
+
+fox.int = brm(FoxCount| trials(Effort) ~ 
+                       scale(MeanBaitIntensity_Twelve) *
+                       scale(Prey_Twelve) + 
+                       arma(time=Session, gr=Site, cov=TRUE), data=count.data, family = 'binomial', cores=4)
+
+
+WAIC(fox.global, fox.global.temp, fox)
+
+best.fox.model = fox.global.temp
+
+df = data.frame(Rain_TwelveMonths = seq(min(count.data$Rain_TwelveMonths), max(count.data$Rain_TwelveMonths), 5),
+                                   MeanBaitIntensity_Twelve = mean(count.data$MeanBaitIntensity_Twelve),
+                                   Prey_Twelve = mean(count.data$Prey_Twelve), Site=NA, Effort=max(count.data$Effort))
+
+a.pred = df %>% tidybayes::add_epred_draws(best.fox.model, re_form=NA, incl_autocor = FALSE, summary=TRUE)
+
+a.pred.mean = a.pred %>% group_by(Rain_TwelveMonths) %>% summarise(Mean = mean(.epred))
+
+a= ggplot() +
+  geom_line(aes(x = a.pred$Rain_TwelveMonths, y = a.pred$.epred, group = a.pred$.draw), alpha = 0.1) +
+  geom_line(aes(x = a.pred.mean$Rain_TwelveMonths, y = a.pred.mean$Mean), color = "red", lwd = 2)
+
+
+
+
+df = data.frame(MeanBaitIntensity_Twelve = seq(min(count.data$MeanBaitIntensity_Twelve), max(count.data$MeanBaitIntensity_Twelve), 0.1),
+                                   Rain_TwelveMonths = mean(count.data$Rain_TwelveMonths),
+                                   Prey_Twelve = mean(count.data$Prey_Twelve), Site=NA, Effort=max(count.data$Effort))
+b.pred = df %>% tidybayes::add_epred_draws(best.fox.model, re_form=NA, incl_autocor = FALSE, summary=TRUE)
+
+b.pred.mean = b.pred %>% group_by(MeanBaitIntensity_Twelve) %>% summarise(Mean = mean(.epred))
+b= ggplot() +
+  geom_line(aes(x = b.pred$MeanBaitIntensity_Twelve, y = b.pred$.epred, group = b.pred$.draw), alpha = 0.1) +
+  geom_line(aes(x = b.pred.mean$MeanBaitIntensity_Twelve, y = b.pred.mean$Mean), color = "red", lwd = 2)
+
+
+
+df= data.frame(Prey_Twelve = seq(min(count.data$Prey_Twelve), max(count.data$Prey_Twelve), 0.02),
+                                   MeanBaitIntensity_Twelve = mean(count.data$MeanBaitIntensity_Twelve),
+                                   Rain_TwelveMonths = mean(count.data$Rain_TwelveMonths),Site=NA, Effort=max(count.data$Effort))
+
+c.pred = df %>% tidybayes::add_epred_draws(best.fox.model, re_form=NA, incl_autocor = FALSE, summary=TRUE)
+
+c.pred.mean = c.pred %>% group_by(Prey_Twelve) %>% summarise(Mean = mean(.epred))
+c= ggplot() +
+  geom_line(aes(x = c.pred$Prey_Twelve, y = c.pred$.epred, group = c.pred$.draw), alpha = 0.1) +
+  geom_line(aes(x = c.pred.mean$Prey_Twelve, y = c.pred.mean$Mean), color = "red", lwd = 2)
+
+
+fox.panel = cowplot::plot_grid(a,b,c, labels=c("a)","b)","c)"), nrow=1)
+
+
+```
+
+## Fit some GLMMs
+### Question 1
+```{r}
+fox.global.model = mgcv::gam(cbind(FoxCount, Effort-FoxCount) ~ 
+                       scale(Rain_TwelveMonths) +
+                       scale(DistAg) +
+                       scale(MeanBaitIntensity_Twelve) +
+                       scale(Prey_Twelve),
+                       correlation = corAR1(form = ~ Session|Site),  
+                       data = count.data, family = binomial)
+
+
+options(na.action = "na.fail")
+fox.dredged.models =  MuMIn::dredge(fox.global.model, rank="AICc")
+
+
+best.fox.model = mgcv::gam(cbind(FoxCount, Effort-FoxCount) ~ 
+                       scale(Rain_TwelveMonths) +
+                       scale(MeanBaitIntensity_Twelve) +
+                       scale(Prey_Twelve),
+                       correlation = corAR1(form = ~ Session|Site),  
+                       data = count.data, family = binomial)
+
+summary(best.fox.model)
+
+r.squaredGLMM(best.fox.model)
+
+coefs = data.frame(Coef = summary(best.fox.model)$p.coeff)
+se = data.frame(SE = summary(best.fox.model)$se)
+coefs = cbind(coefs, se)
+coefs$lci = coefs$Coef - coefs$SE*1.96
+coefs$uci = coefs$Coef + coefs$SE*1.96
+coefs$Model = "Fox"
+
+write.csv(fox.dredged.models, "~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Outputs/FoxModelSel_03062022.csv")
+```
+
+#### Plot Results
+```{r}
+pred = data.frame(Rain_TwelveMonths = seq(min(count.data$Rain_TwelveMonths), max(count.data$Rain_TwelveMonths), 5),
+                  MeanBaitIntensity_Twelve = mean(count.data$MeanBaitIntensity_Twelve),
+                  Prey_Twelve = mean(count.data$Prey_Twelve))
+
+prediction = predict(best.fox.model, newdata=pred, se.fit=TRUE, type="response")
+pred$fit = prediction$fit
+pred$se = prediction$se.fit
+
+fox.a = ggplot(pred) + geom_ribbon(aes(x = Rain_TwelveMonths, ymin = fit-se*1.96, ymax=fit+se*1.96), alpha=0.4)+
+  geom_line(aes(x=Rain_TwelveMonths, y = fit)) + 
+  xlab("Rain in Previous Twelve Months (mm)") + ylab("Fox Reporting Rate") + theme_bw() +
+  theme(plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) + ylim(c(0, 0.25))
+
+pred = data.frame(MeanBaitIntensity_Twelve = seq(min(count.data$MeanBaitIntensity_Twelve), 
+                                                 max(count.data$MeanBaitIntensity_Twelve), 0.1),
+                                   Rain_TwelveMonths = mean(count.data$Rain_TwelveMonths),
+                                   Prey_Twelve = mean(count.data$Prey_Twelve))
+prediction = predict(best.fox.model, newdata=pred, se.fit=TRUE, type="response")
+pred$fit = prediction$fit
+pred$se = prediction$se.fit
+
+
+fox.b = ggplot(pred) + geom_ribbon(aes(x = MeanBaitIntensity_Twelve, ymin = fit-se*1.96, ymax=fit+se*1.96), alpha=0.4)+
+  geom_line(aes(x=MeanBaitIntensity_Twelve, y = fit)) + 
+  xlab("Bait Intensity Previous Twelve Months (baits/km^2)") + ylab("Fox Reporting Rate") +theme_bw() +
+  theme(plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) + ylim(c(0, 0.25))
+
+pred = data.frame(Prey_Twelve = seq(min(count.data$Prey_Twelve), max(count.data$Prey_Twelve), 0.02),
+                                   MeanBaitIntensity_Twelve = mean(count.data$MeanBaitIntensity_Twelve),
+                                   Rain_TwelveMonths = mean(count.data$Rain_TwelveMonths))
+prediction = predict(best.fox.model, newdata=pred, se.fit=TRUE, type="response")
+pred$fit = prediction$fit
+pred$se = prediction$se.fit
+
+
+fox.c = ggplot(pred) + geom_ribbon(aes(x = Prey_Twelve, ymin = fit-se*1.96, ymax=fit+se*1.96), alpha=0.4)+
+  geom_line(aes(x=Prey_Twelve, y = fit)) + xlab("Prey Abundance Index") + ylab("Fox Reporting Rate") + theme_bw() +
+  theme(plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) + ylim(c(0, 0.25))
+
+
+fox.panel = cowplot::plot_grid(fox.a,fox.b,fox.c, labels=c("a)","b)","c)"), nrow=1)
+
+ggsave("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Outputs/Fig3_foxpanel_03062022.pdf", plot=fox.panel, dpi=600, width=5, height=1.5, scale =2, units="in")
+
+```
+
+
+### Question 2
+```{r}
+foxint.m1 = mgcv::gam(cbind(FoxCount, Effort-FoxCount) ~ 1, 
+                      data = count.data, family = 'binomial', correlation = corAR1(form = ~ Session|Site))
+foxint.m2 = mgcv::gam(cbind(FoxCount, Effort-FoxCount) ~ scale(MeanBaitIntensity_Twelve)*scale(Rain_TwelveMonths),
+                      data = count.data, family = 'binomial', correlation = corAR1(form = ~ Session|Site))
+foxint.m3 = mgcv::gam(cbind(FoxCount, Effort-FoxCount) ~ scale(MeanBaitIntensity_Twelve)*scale(Prey_Twelve),
+                      data = count.data, family = 'binomial', correlation = corAR1(form = ~ Session|Site))
+foxint.m4 = mgcv::gam(cbind(FoxCount, Effort-FoxCount) ~ scale(MeanBaitIntensity_Twelve)*scale(DistAg), 
+                      data = count.data, family = 'binomial', correlation = corAR1(form = ~ Session|Site))
+
+
+model.sel.fox = model.sel(foxint.m1, foxint.m2, foxint.m3, foxint.m4)
+model.sel.fox
+best.fox.model = mgcv::gam(cbind(FoxCount, Effort-FoxCount) ~ scale(MeanBaitIntensity_Twelve)*scale(Prey_Twelve),
+                      data = count.data, family = 'binomial', correlation = corAR1(form = ~ Session|Site))
+
+summary(best.fox.model)
+
+r.squaredGLMM(best.fox.model)
+coefs.int = data.frame(Coef = summary(best.fox.model)$p.coeff)
+se = data.frame(SE = summary(best.fox.model)$se)
+coefs.int = cbind(coefs.int, se)
+coefs.int$lci = coefs.int$Coef - coefs.int$SE*1.96
+coefs.int$uci = coefs.int$Coef + coefs.int$SE*1.96
+coefs.int$Model = "Fox Int"
+
+write.csv(model.sel.fox, "~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Outputs/FoxBaitModelSel_03062022.csv")
+
+```
+
+
+## Plot Results
+```{r}
+pred = data.frame(expand.grid(MeanBaitIntensity_Twelve = seq(min(count.data$MeanBaitIntensity_Twelve), 
+                                                 max(count.data$MeanBaitIntensity_Twelve), 0.1),
+                                   Prey_Twelve = quantile(count.data$Prey_Twelve, probs = c(0.10, 0.5, 0.90))))
+
+prediction = predict(best.fox.model, newdata=pred, se.fit=TRUE, type="response")
+pred$fit = prediction$fit
+pred$se = prediction$se.fit
+pred$Prey_Twelve = as.factor(round(pred$Prey_Twelve, digits=1))
+
+fox.int = ggplot() + 
+  geom_ribbon(aes(x=pred$MeanBaitIntensity_Twelve, ymin=pred$fit-1.96*pred$se, ymax=pred$fit+1.96*pred$se, fill=pred$Prey_Twelve), alpha=0.4) +
+  geom_line(aes(x=pred$MeanBaitIntensity_Twelve, y=pred$fit, colour=pred$Prey_Twelve)) +
+  #geom_point(aes(x=count.data$MeanBaitIntensity_Twelve, y=count.data$FoxRR)) + 
+  xlab("Baiting Intensity prv 12 months (Baits/km^2)") + ylab("Fox Reporting Rate") +
+  scale_color_viridis_d(name = "Prey Activity Index") +
+  scale_fill_viridis_d(name = "Prey Activity Index") + theme_bw() +
+  theme(plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) + ylim(c(0, 0.25))
+
+pred = data.frame(expand.grid(Prey_Twelve = seq(min(count.data$Prey_Twelve), 
+                                                 max(count.data$Prey_Twelve), 0.01),
+                                   MeanBaitIntensity_Twelve = quantile(count.data$MeanBaitIntensity_Twelve, probs = c(0.10, 0.5, 0.90))))
+
+prediction = predict(best.fox.model, newdata=pred, se.fit=TRUE, type="response")
+pred$fit = prediction$fit
+pred$se = prediction$se.fit
+pred$MeanBaitIntensity_Twelve = as.factor(round(pred$MeanBaitIntensity_Twelve, digits=1))
+
+fox.int = ggplot() + 
+  geom_ribbon(aes(x=pred$Prey_Twelve, ymin=pred$fit-1.96*pred$se, ymax=pred$fit+1.96*pred$se, fill=pred$MeanBaitIntensity_Twelve), alpha=0.4) +
+  geom_line(aes(x=pred$Prey_Twelve, y=pred$fit, colour=pred$MeanBaitIntensity_Twelve)) +
+  #geom_point(aes(x=count.data$MeanBaitIntensity_Twelve, y=count.data$FoxRR)) + 
+  xlab("Prey Activity Index") + ylab("Fox Reporting Rate") +
+  scale_color_viridis_d(name = "Baiting Intensity (Baits/km^2)") +
+  scale_fill_viridis_d(name = "Baiting Intensity (Baits/km^2)") + theme_bw() +
+  theme(plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) + ylim(c(0, 0.25))
+
+
+ggsave("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Outputs/Fig4_foxint_03062022.pdf", plot=fox.int, dpi=600, width=3.5, height=2, scale =1.5, units="in")
+```
+
+# FERAL CAT
+## Temporal autocorrelation
+```{r}
+
+cat = brm(CatCount| trials(Effort) ~ (1|Site), data=count.data, family = 'binomial', cores=4)
+
+cat.global = brm(CatCount| trials(Effort) ~ 
+                       scale(Rain_TwelveMonths) +
+                       scale(DistAg) +
+                       scale(MeanBaitIntensity_Twelve) +
+                       scale(Prey_Twelve) + (1|Site), data=count.data, family = 'binomial', cores=4)
+
+cat.global.temp = brm(CatCount| trials(Effort) ~ 
+                       scale(Rain_TwelveMonths) +
+                       scale(MeanBaitIntensity_Twelve) +
+                       scale(Prey_Twelve) + 
+                       scale(FoxRR) + (1|Site) + (1|Year) +
+                       arma(time=Session, gr=Site, cov=TRUE) + (1|Site), data=count.data, family = 'binomial', cores=4)
+
+WAIC(cat.global, cat.global.temp, cat)
+
+best.cat.model = cat.global.temp
+
+df = data.frame(Rain_TwelveMonths = seq(min(count.data$Rain_TwelveMonths), max(count.data$Rain_TwelveMonths), 5),
+                                   MeanBaitIntensity_Twelve = mean(count.data$MeanBaitIntensity_Twelve),
+                                   FoxRR = mean(count.data$FoxRR),
+                                   Prey_Twelve = mean(count.data$Prey_Twelve), Site=NA,Year=NA, Effort=1)
+
+a.pred = df %>% tidybayes::add_epred_draws(best.cat.model, re_form=NA, incl_autocor = FALSE, summary=TRUE)
+
+a.pred.mean = a.pred %>% group_by(Rain_TwelveMonths) %>% summarise(Mean = mean(.epred))
+
+a= ggplot() +
+  geom_line(aes(x = a.pred$Rain_TwelveMonths, y = a.pred$.epred, group = a.pred$.draw), alpha = 0.1) +
+  geom_line(aes(x = a.pred.mean$Rain_TwelveMonths, y = a.pred.mean$Mean), color = "red", lwd = 2)
+
+
+
+
+df = data.frame(MeanBaitIntensity_Twelve = seq(min(count.data$MeanBaitIntensity_Twelve), max(count.data$MeanBaitIntensity_Twelve), 0.1),
+                                   Rain_TwelveMonths = mean(count.data$Rain_TwelveMonths),
+                                   FoxRR = mean(count.data$FoxRR),
+                                   Prey_Twelve = mean(count.data$Prey_Twelve), Site=NA, Effort=max(count.data$Effort))
+b.pred = df %>% tidybayes::add_epred_draws(best.cat.model, re_form=NA, incl_autocor = FALSE, summary=TRUE)
+
+b.pred.mean = b.pred %>% group_by(MeanBaitIntensity_Twelve) %>% summarise(Mean = mean(.epred))
+b= ggplot() +
+  geom_line(aes(x = b.pred$MeanBaitIntensity_Twelve, y = b.pred$.epred, group = b.pred$.draw), alpha = 0.1) +
+  geom_line(aes(x = b.pred.mean$MeanBaitIntensity_Twelve, y = b.pred.mean$Mean), color = "red", lwd = 2)
+
+
+
+df= data.frame(Prey_Twelve = seq(min(count.data$Prey_Twelve), max(count.data$Prey_Twelve), 0.02),
+                                   MeanBaitIntensity_Twelve = mean(count.data$MeanBaitIntensity_Twelve),
+                                   FoxRR = mean(count.data$FoxRR),
+                                   Rain_TwelveMonths = mean(count.data$Rain_TwelveMonths),Site=NA, Effort=max(count.data$Effort))
+
+c.pred = df %>% tidybayes::add_epred_draws(best.cat.model, re_form=NA, incl_autocor = FALSE, summary=TRUE)
+
+c.pred.mean = c.pred %>% group_by(Prey_Twelve) %>% summarise(Mean = mean(.epred))
+c= ggplot() +
+  geom_line(aes(x = c.pred$Prey_Twelve, y = c.pred$.epred, group = c.pred$.draw), alpha = 0.1) +
+  geom_line(aes(x = c.pred.mean$Prey_Twelve, y = c.pred.mean$Mean), color = "red", lwd = 2)
+
+
+cat.panel = cowplot::plot_grid(a,b,c, labels=c("a)","b)","c)"), nrow=1)
+
+
+```
+
+## Fit some GLMMs
+```{r}
+cat.global.model = mgcv::gam(cbind(CatCount, Effort-CatCount) ~ 
+                           scale(Rain_TwelveMonths)+
+                           scale(FoxRR)+
+                           scale(DistAg)+
+                           scale(MeanBaitIntensity_Twelve)+
+                           scale(Prey_Twelve),
+                           data = count.data, family = 'binomial',  correlation = corAR1(form = ~ Session|Site))
+
+options(na.action = "na.fail")
+cat.dredged.models =  MuMIn::dredge(cat.global.model, rank="AICc")
+
+best.cat.model = mgcv::gam(cbind(CatCount, Effort-CatCount) ~ 
+                           scale(MeanBaitIntensity_Twelve)+
+                           scale(Prey_Twelve),
+                           data = count.data, family = 'binomial',  correlation = corAR1(form = ~ Session|Site))
+summary(best.cat.model)
+r.squaredGLMM(best.cat.model)
+
+coefs.cat = data.frame(Coef = summary(best.cat.model)$p.coeff)
+se = data.frame(SE = summary(best.cat.model)$se)
+coefs.cat = cbind(coefs.cat, se)
+coefs.cat$lci = coefs.cat$Coef - coefs.cat$SE*1.96
+coefs.cat$uci = coefs.cat$Coef + coefs.cat$SE*1.96
+coefs.cat$Model = "Cat"
+
+write.csv(cat.dredged.models, "~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Outputs/CatModelSel_03062022.csv")
+
+
+all.coefs = rbind(coefs, coefs.int, coefs.cat)
+all.coefs$Predictor = rownames(all.coefs)
+
+write.csv(all.coefs, "~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Outputs/CoefTable_03062022.csv")
+
+```
+
+## Plot Results
+```{r}
+pred = data.frame(MeanBaitIntensity_Twelve = seq(min(count.data$MeanBaitIntensity_Twelve),
+                                                 max(count.data$MeanBaitIntensity_Twelve), 0.1),
+                                   Prey_Twelve = mean(count.data$Prey_Twelve))
+
+prediction = predict(best.cat.model, newdata=pred, se.fit=TRUE, type="response")
+pred$fit = prediction$fit
+pred$se = prediction$se.fit
+
+cat.a = ggplot(pred) + geom_ribbon(aes(x = MeanBaitIntensity_Twelve, ymin = fit-se*1.96, ymax=fit+se*1.96), alpha=0.4)+
+  geom_line(aes(x=MeanBaitIntensity_Twelve, y = fit)) + xlab("Bait Intensity Previous Twelve Months (baits/km^2)") + ylab("Cat Reporting Rate") + theme_bw() +
+  theme(plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) + ylim(c(0, 0.17))
+
+
+pred= data.frame(Prey_Twelve = seq(min(count.data$Prey_Twelve), max(count.data$Prey_Twelve), 0.02),
+                 MeanBaitIntensity_Twelve = mean(count.data$MeanBaitIntensity_Twelve))
+prediction = predict(best.cat.model, newdata=pred, se.fit=TRUE, type="response")
+pred$fit = prediction$fit
+pred$se = prediction$se.fit
+
+cat.b = ggplot(pred) + geom_ribbon(aes(x = Prey_Twelve, ymin = fit-se*1.96, ymax=fit+se*1.96), alpha=0.4)+
+  geom_line(aes(x=Prey_Twelve, y = fit)) + xlab("Prey Abundance Index") + ylab("Cat Reporting Rate") + theme_bw() +
+  theme(plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) + ylim(c(0, 0.17))
+
+
+cat.panel=cowplot::plot_grid(cat.a,cat.b,labels=c("a)","b)"), nrow=1)
+
+ggsave("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/_Projects/upperwarren_foxcat/Outputs/Fig5_catpanel_03062022.pdf", plot=cat.panel, dpi=600, width=3, height=1.5, scale =2, units="in")
+```

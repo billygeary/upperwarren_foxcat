@@ -1,7 +1,14 @@
 # History files
 .Rhistory
 .Rapp.history
-
+# Folders
+.DS_Store
+/Archive_Outputs/
+/Archive_Scripts/
+/Data_Processing/
+/Documents/
+/Outputs/
+/Scripts/archived/
 # Session Data files
 .RData
 

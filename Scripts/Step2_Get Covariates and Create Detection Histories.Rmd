@@ -1,0 +1,1012 @@
+---
+title: "Upper Warren Predator Activity"
+subtitle: "Covariate Compilation"
+author: "Billy Geary" 
+date: "14/09/2020"
+output:
+  html_document:
+    depth: 1
+    number_sections: no
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+    code_download: false
+editor_options:
+  chunk_output_type: console
+---
+
+# Introduction & setup
+
+```{r setup, include=TRUE, message=FALSE, warning=FALSE}
+library(fasterize)
+library(leaflet)
+library(unmarked)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(sf)
+library(raster)
+library(gt)
+library(MuMIn)
+
+padop = read.csv("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Predator data/sandpads.active.long.csv")
+padop$Start = as.Date(padop$Start, format = "%d/%m/%y")
+padop$End = as.Date(padop$End, format = "%d/%m/%y")
+padop$Problem1_start = as.Date(padop$Problem1_start, format = "%d/%m/%y")
+padop$Problem1_end = as.Date(padop$Problem1_end, format = "%d/%m/%y")
+padop$Problem2_start = as.Date(padop$Problem2_start, format = "%d/%m/%y")
+padop$Problem2_end = as.Date(padop$Problem2_end, format = "%d/%m/%y")
+
+baits = read.csv("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Predator data/predator.baiting.combined_BG_210415.csv")
+
+
+# Sand pad locations
+sand.pad.points = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Predators/Sandpad_arraysx6.shp")
+sand.pad.points = as_Spatial(sand.pad.points)
+proj4string(sand.pad.points) <- CRS("+init=epsg:28350")
+
+```
+
+## Load the detection histories
+```{r, message=FALSE, warning=FALSE}
+file.path ="~/Dropbox/Billy/_Research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Predator data/"
+
+load(paste0(file.path,"cats.sandpads.dethist.21052021.Rda")); cats = cats.dethist[,3:14]
+load(paste0(file.path,"foxes.sandpads.dethist.21052021.Rda")); foxes = foxes.dethist[,3:14]
+```
+
+## Create map of study area
+```{r}
+map.points = st_transform(st_as_sf(sand.pad.points), crs='+proj=longlat +datum=WGS84')
+
+m1 =  leaflet(options = leafletOptions(zoomControl = FALSE)) %>% 
+  # add basemap
+  addProviderTiles(providers$OpenStreetMap) %>%
+  # focus map in a certain area / zoom level
+  setView(lng = 116.472, lat=-34.162, zoom = 11) %>%
+  # add graticules with nice labels (recommended for static plot)
+ # addSimpleGraticule(interval = 2) %>%
+  # add scale bar
+  addScaleBar(position = "topright", options = c(imperial = FALSE)) %>%
+  # add sand pads
+  addCircles(data = map.points, color = "black", weight = 4, opacity = 1, fillOpacity = 1) %>%
+  addLegend(position='topleft',colors ='black',labels = "Sand Pads", values = map.points,opacity = 1, title="Legend") %>%
+  # add inset map - australia
+addMiniMap(tiles = providers$OpenStreetMap,
+           position = 'bottomleft', 
+           width = 250, height = 225,
+           centerFixed = c(lng=116.97, lat=-33.44),
+           zoomLevelFixed = 6,
+           toggleDisplay = FALSE)
+#m1
+
+mapview::mapshot(m1,
+                 remove_controls = c("zoomControl", "layersControl", "homeButton","drawToolbar", "easyButton"),
+                 file="~/Dropbox/_Research/_PhD/07_UpperWarren_WA/docs/Predator paper/Figures/StudyArea_Figure.pdf")
+mapview::mapshot(m1,
+                 remove_controls = c("zoomControl", "layersControl", "homeButton","drawToolbar", "easyButton"),
+                 file="~/Dropbox/_Research/_PhD/07_UpperWarren_WA/docs/Predator paper/Figures/StudyArea_Figure.jpg")
+```
+
+## Look at naiive occupancy over time for both foxes and cats
+This plot shows naive occupancy for foxes and cats each, based on the data we've got from the sand pads
+```{r message=FALSE, echo=TRUE, warning=FALSE, paged.print=TRUE, fig.width=9}
+# 21 seasons
+# 6 transects
+
+lookup = sand.pad.points@data
+det.hist = data.frame(cats.dethist)
+det.hist$SandPadID = det.hist$Site
+det.hist = left_join(lookup, det.hist, by = "SandPadID")
+transects = unique(det.hist$BlockCode)  
+
+det.hist[,9:20] <- sapply(det.hist[,9:20],'as.numeric')
+
+cat.naive.occ = det.hist %>% 
+  mutate(PA = rowSums(det.hist[,9:20],na.rm=TRUE)) %>%
+  mutate(PA = ifelse(PA > 0,1,PA)) %>%
+  group_by(BlockCode,Session) %>% 
+  summarise(Cat_Naive = sum(PA)/25) 
+
+
+
+lookup = sand.pad.points@data
+det.hist = data.frame(foxes.dethist)
+det.hist$SandPadID = det.hist$Site
+det.hist = left_join(lookup, det.hist, by = "SandPadID")
+transects = unique(det.hist$BlockCode)  
+
+det.hist[,9:20] <- sapply(det.hist[,9:20],'as.numeric')
+
+fox.naive.occ = det.hist %>% 
+  mutate(PA = rowSums(det.hist[,9:20],na.rm=TRUE)) %>%
+  mutate(PA = ifelse(PA > 0,1,PA)) %>%
+  group_by(BlockCode,Session) %>% 
+  summarise(Fox_Naive = sum(PA)/25) 
+
+
+
+
+sand.pads = read.csv("~/Dropbox/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Predator data/extracteddata_sandpads.csv")
+sand.pads$FirstDate = as.Date(sand.pads$Date, format = "%d/%m/%Y")
+padop$Session = as.character(padop$Session)
+naive.occ = left_join(fox.naive.occ, cat.naive.occ, by = c("BlockCode", "Session"))
+
+naive.occ$Session = as.character(naive.occ$Session)
+
+naive.occ = left_join(padop, naive.occ, by = c("TransectID"="BlockCode", "Session"))
+naive.occ$FirstDate = lubridate::floor_date(naive.occ$Start, "month")
+naive.occ = left_join(naive.occ, sand.pads, by = c("Transect", "FirstDate"))
+#naive.occ = naive.occ %>% drop_na(Start)
+
+naive.occ$Session = as.numeric(naive.occ$Session)
+
+ggplot(naive.occ) + 
+  geom_line(aes(x=Start, y = Fox_Naive, colour="Fox")) + 
+  geom_line(aes(x=Start, y = Cat_Naive, colour="Cat")) + 
+  geom_point(aes(x=Start, y = Fox_Naive, colour="Fox")) + 
+  geom_point(aes(x=Start, y = Cat_Naive, colour="Cat")) + facet_wrap(~TransectID)
+
+```
+
+# Create the Covariates we want to model
+## Baiting intensity
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, fig.width=9}
+#####################
+# BAITING INTENSITY #
+#####################
+library(lubridate)
+
+bait.crs = st_crs(20350)
+
+# Read in baiting spatial data
+# First do Manjimup Western Shield ground baiting
+balban = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Baiting/Balban.shp")
+camelar = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Baiting/Camelar.shp")
+keninup = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Baiting/Keninup.shp")
+kingston = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Baiting/Kingston.shp")
+#perupcore = read_sf("~/Dropbox/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Baiting/New Perup_Core.shp")
+perupcore = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Baiting/Perup Core.shp")
+perup_yendicup = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Baiting/Perup_Yendicup_Baiting.shp")
+
+perupcore = perupcore  %>% st_union() %>% st_as_sf()
+balban = balban %>% st_transform(bait.crs) %>% st_union() %>% st_buffer(dist=2500) %>% st_as_sf() 
+camelar = camelar %>% st_set_crs(bait.crs) %>% st_union() %>% st_buffer(dist=2500) %>% st_as_sf() 
+keninup = keninup %>% st_set_crs(bait.crs) %>% st_union() %>% st_buffer(dist=2500) %>% st_as_sf() 
+kingston = kingston %>% st_set_crs(bait.crs) %>% st_union() %>% st_buffer(dist=2500) %>% st_as_sf() 
+perupcore = perupcore %>% st_set_crs(bait.crs) %>% st_union() %>% st_buffer(dist=2500) %>% st_as_sf() 
+yendicup = perup_yendicup %>% filter(Program == "Yendicup Core Baiting") %>% st_union() %>% st_buffer(dist=2500) %>% st_as_sf() 
+# Perup whole is an amalgamation of balban, camelar and keninup where we cant distinguish the bait numbers between transects
+perup_whole = st_union(balban, camelar) 
+perup_whole = st_union(perup_whole, keninup)
+
+# Add in extra Western Shield ground baiting (Denbarker & Lake Muir)
+den.muir = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Predator data/BaitingData Request/baiting data from Marika 2021/Baiting History/Denbarker.Lake Muir 15.08.19.shp")
+den.muir= den.muir %>% st_set_crs(bait.crs) %>% st_union()  %>% st_buffer(dist=2500) %>% st_as_sf() 
+
+# Add in De Longraft road pre-October 2012
+# Discussed with AW and MM on 20/04/2021
+# Quarterly baiting at 50 baits per quarter estimate
+delandgraaft = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Predator data/BaitingData Request/baiting data from Marika 2021/Baiting History/deLandgrafft.shp")
+delandgraaft = delandgraaft %>% st_transform(bait.crs) %>% st_union() %>% st_buffer(dist=2500) %>% st_as_sf() 
+
+# Add in Translocations
+translocations = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Predator data/BaitingData Request/baiting data from Marika 2021/Baiting History/Translocations.shp")
+translocations = translocations %>% st_transform(bait.crs) %>% st_buffer(dist=2500) %>% st_as_sf() 
+warrup_trans = translocations %>% filter(Zone =="Warrup") %>% st_union() %>% st_as_sf()
+yendicup_trans = translocations %>% filter(Zone =="Yendicup") %>% st_union() %>% st_as_sf()
+walcott_trans = translocations %>% filter(Zone =="Walcott") %>% st_union() %>% st_as_sf()
+
+# Last do Western Shield Aerial baiting for three cells
+aerial = read_sf("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Baiting/WesternShield Flight Cells.shp")
+manjimup = aerial %>% st_transform(bait.crs) %>% filter(CELL_NAME == "Manjimup") %>% st_union() %>% st_as_sf() 
+shannon = aerial %>% st_transform(bait.crs) %>% filter(CELL_NAME == "Shannon") %>% st_union() %>% st_as_sf() 
+denbarker = aerial %>% st_transform(bait.crs) %>% filter(CELL_NAME == "Denbarker") %>% st_union() %>% st_as_sf() 
+
+
+# Baiting count data across whole study region
+baits = read.csv("~/Dropbox/Billy/_research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Predator data/predator.baiting.combined_BG_210415.csv")
+baits = baits %>% filter(Purpose != "FPC Fox Baiting") %>%
+  mutate(StartDate = as.Date(StartDate, format= "%d/%m/%y"))
+
+aerial.baits = baits %>% filter(Aerial_Ground == 'Aerial') %>% 
+  mutate(Year = year(StartDate)) %>%
+  group_by(BaitingCell, Year) %>%
+  summarise(Runs = n(), 
+           TotalBaits = sum(BaitCount))
+
+library(viridisLite)
+ggplot(aerial.baits) + 
+  geom_tile(aes(x=Year, y = BaitingCell, fill=as.factor(Runs))) + 
+  scale_fill_viridis_d(name="Number of Runs") + theme_bw()
+
+region = st_union(manjimup, shannon)
+region = st_union(region, denbarker)
+ras = raster(extent(region), res=25, vals = 1)
+
+
+# Extract dates for each session and create empty data frame
+dates = unique(padop$DummyDate)
+data = data.frame(Site = sand.pad.points$SandPadID, Block = sand.pad.points$BlockCode)
+
+twelve.baits.list = list()
+
+for (d in 1:length(dates)){
+  date.num = as.Date(dates[d], format= "%d/%m/%y")
+  
+  three_baits = baits %>% filter(StartDate < date.num  & StartDate > (date.num-months(3)))  # Baiting runs in previous 3 months
+  six_baits = baits %>% filter(StartDate < date.num  & StartDate > (date.num-months(6)))  # Baiting runs in previous 6 months
+  twelve_baits = baits %>% filter(StartDate < date.num  & StartDate > (date.num-months(12)))  # Baiting runs in previous 12 months
+  
+  # Aerial baiting
+  manjimup_area = manjimup %>% st_area() %>% as.numeric()
+  manjimup_three = three_baits %>% filter(Zone == "Manjimup Cell")
+  manjimup_six = six_baits %>% filter(Zone == "Manjimup Cell")
+  manjimup_twelve = twelve_baits %>% filter(Zone == "Manjimup Cell")
+  
+  manjimup$Three = sum(manjimup_three$BaitCount)/(manjimup_area/1000000) # Baits per km in previous 3 months
+  manjimup$Six = sum(manjimup_six$BaitCount)/(manjimup_area/1000000) # Baits per km in previous 6 months
+  manjimup$Twelve = sum(manjimup_twelve$BaitCount)/(manjimup_area/1000000) # Baits per km in previous 12 months
+  
+  manjimup_three_raster = fasterize(manjimup, ras, field="Three")
+  manjimup_six_raster = fasterize(manjimup, ras, field="Six")
+  manjimup_twelve_raster = fasterize(manjimup, ras, field="Twelve")
+  
+  # Shannon
+  shannon_area = shannon %>% st_area() %>% as.numeric()
+  shannon_three = three_baits %>% filter(Zone == "Shannon")
+  shannon_six = six_baits %>% filter(Zone == "Shannon")
+  shannon_twelve = twelve_baits %>% filter(Zone == "Shannon")
+  
+  shannon$Three = sum(shannon_three$BaitCount)/(shannon_area/1000000) # Baits per km in previous 3 months
+  shannon$Six = sum(shannon_six$BaitCount)/(shannon_area/1000000) # Baits per km in previous 6 months
+  shannon$Twelve = sum(shannon_twelve$BaitCount)/(shannon_area/1000000) # Baits per km in previous 12 months
+  
+  shannon_three_raster = fasterize(shannon, ras, field="Three")
+  shannon_six_raster = fasterize(shannon, ras, field="Six")
+  shannon_twelve_raster = fasterize(shannon, ras, field="Twelve")
+  
+  # Denbarker
+  denbarker_area = denbarker %>% st_area() %>% as.numeric()
+  denbarker_three = three_baits %>% filter(Zone == "Denbarker")
+  denbarker_six = six_baits %>% filter(Zone == "Denbarker")
+  denbarker_twelve = twelve_baits %>% filter(Zone == "Denbarker")
+  
+  denbarker$Three = sum(denbarker_three$BaitCount)/(denbarker_area/1000000) # Baits per km in previous 3 months
+  denbarker$Six = sum(denbarker_six$BaitCount)/(denbarker_area/1000000) # Baits per km in previous 6 months
+  denbarker$Twelve = sum(denbarker_twelve$BaitCount)/(denbarker_area/1000000) # Baits per km in previous 12 months
+  
+  denbarker_three_raster = fasterize(denbarker, ras, field="Three")
+  denbarker_six_raster = fasterize(denbarker, ras, field="Six")
+  denbarker_twelve_raster = fasterize(denbarker, ras, field="Twelve")
+  
+  # Kingston
+  kingston_area = kingston %>% st_area() %>% as.numeric()
+  kingston_three = three_baits %>% filter(Zone == "Kingston") 
+  kingston_six = six_baits %>% filter(Zone == "Kingston") 
+  kingston_twelve = twelve_baits %>% filter(Zone == "Kingston") 
+  
+  kingston$Three = sum(kingston_three$BaitCount)/(kingston_area/1000000)
+  kingston$Six = sum(kingston_six$BaitCount)/(kingston_area/1000000)
+  kingston$Twelve = sum(kingston_twelve$BaitCount)/(kingston_area/1000000)
+  
+  kingston_three_raster = fasterize(kingston, ras, field="Three")
+  kingston_six_raster = fasterize(kingston, ras, field="Six")
+  kingston_twelve_raster = fasterize(kingston, ras, field="Twelve")
+  
+  # Perup (whole) -- only pre-2010
+  perup_area = perup_whole %>% st_area() %>% as.numeric()
+  perup_three = three_baits %>% filter(Zone == "Perup ground (Ken, Cam, Bal)") 
+  perup_six = six_baits %>% filter(Zone == "Perup ground (Ken, Cam, Bal)") 
+  perup_twelve = twelve_baits %>% filter(Zone == "Perup ground (Ken, Cam, Bal)") 
+  
+  perup_whole$Three = sum(perup_three$BaitCount)/(perup_area/1000000)
+  perup_whole$Six = sum(perup_six$BaitCount)/(perup_area/1000000)
+  perup_whole$Twelve = sum(perup_twelve$BaitCount)/(perup_area/1000000)
+  
+  perup_three_raster = fasterize(perup_whole, ras, field="Three")
+  perup_six_raster = fasterize(perup_whole, ras, field="Six")
+  perup_twelve_raster = fasterize(perup_whole, ras, field="Twelve")
+  
+  # De landgraaft
+  delandgraaft_area = delandgraaft %>% st_area() %>% as.numeric()
+  delandgraaft_three = three_baits %>% filter(Zone == "deLandgraaft") 
+  delandgraaft_six = six_baits %>% filter(Zone == "deLandgraaft") 
+  delandgraaft_twelve = twelve_baits %>% filter(Zone == "deLandgraaft") 
+  
+  delandgraaft$Three = sum(delandgraaft_three$BaitCount)/(delandgraaft_area/1000000)
+  delandgraaft$Six = sum(delandgraaft_six$BaitCount)/(delandgraaft_area/1000000)
+  delandgraaft$Twelve = sum(delandgraaft_twelve$BaitCount)/(delandgraaft_area/1000000)
+  
+  delandgraaft_three_raster = fasterize(delandgraaft, ras, field="Three")
+  delandgraaft_six_raster = fasterize(delandgraaft, ras, field="Six")
+  delandgraaft_twelve_raster = fasterize(delandgraaft, ras, field="Twelve")
+  
+  # Perup Core -- only post=
+  perupcore_area = perupcore %>% st_area() %>% as.numeric()
+  perupcore_three = three_baits %>% filter(Zone == "PerupCore") 
+  perupcore_six = six_baits %>% filter(Zone == "PerupCore") 
+  perupcore_twelve = twelve_baits %>% filter(Zone == "PerupCore") 
+  
+  perupcore$Three = sum(perupcore_three$BaitCount)/(perupcore_area/1000000)
+  perupcore$Six = sum(perupcore_six$BaitCount)/(perupcore_area/1000000)
+  perupcore$Twelve = sum(perupcore_twelve$BaitCount)/(perupcore_area/1000000)
+  
+  perupcore_three_raster = fasterize(perupcore, ras, field="Three")
+  perupcore_six_raster = fasterize(perupcore, ras, field="Six")
+  perupcore_twelve_raster = fasterize(perupcore, ras, field="Twelve")
+  
+  # Balban
+  balban_area = balban %>% st_area() %>% as.numeric()
+  balban_three = three_baits %>% filter(Zone == "Balban") 
+  balban_six = six_baits %>% filter(Zone == "Balban") 
+  balban_twelve = twelve_baits %>% filter(Zone == "Balban") 
+  
+  balban$Three = sum(balban_three$BaitCount)/(balban_area/1000000)
+  balban$Six = sum(balban_six$BaitCount)/(balban_area/1000000)
+  balban$Twelve = sum(balban_twelve$BaitCount)/(balban_area/1000000)
+  
+  balban_three_raster = fasterize(balban, ras, field="Three")
+  balban_six_raster = fasterize(balban, ras, field="Six")
+  balban_twelve_raster = fasterize(balban, ras, field="Twelve")
+  
+  # Camelar
+  camelar_area = camelar %>% st_area() %>% as.numeric()
+  camelar_three = three_baits %>% filter(Zone == "Camelar") 
+  camelar_six = six_baits %>% filter(Zone == "Camelar") 
+  camelar_twelve = twelve_baits %>% filter(Zone == "Camelar") 
+  
+  camelar$Three = sum(camelar_three$BaitCount)/(camelar_area/1000000)
+  camelar$Six = sum(camelar_six$BaitCount)/(camelar_area/1000000)
+  camelar$Twelve = sum(camelar_twelve$BaitCount)/(camelar_area/1000000)
+  
+  camelar_three_raster = fasterize(camelar, ras, field="Three")
+  camelar_six_raster = fasterize(camelar, ras, field="Six")
+  camelar_twelve_raster = fasterize(camelar, ras, field="Twelve")
+  
+  # Keninuo
+  keninup_area = keninup %>% st_area() %>% as.numeric()
+  keninup_three = three_baits %>% filter(Zone == "Keninup") 
+  keninup_six = six_baits %>% filter(Zone == "Keninup") 
+  keninup_twelve = twelve_baits %>% filter(Zone == "Keninup") 
+  
+  keninup$Three = sum(keninup_three$BaitCount)/(keninup_area/1000000)
+  keninup$Six = sum(keninup_six$BaitCount)/(keninup_area/1000000)
+  keninup$Twelve = sum(keninup_twelve$BaitCount)/(keninup_area/1000000)
+  
+  keninup_three_raster = fasterize(keninup, ras, field="Three")
+  keninup_six_raster = fasterize(keninup, ras, field="Six")
+  keninup_twelve_raster = fasterize(keninup, ras, field="Twelve")
+  
+  # Denbarker - Lake Muir Ground Baiting
+  den.muir_area = den.muir %>% st_area() %>% as.numeric()
+  den.muir_three = three_baits %>% filter(BaitingCell == "Denbarker" & Purpose == "Western Shield" & Aerial_Ground == "Ground") 
+  den.muir_six = six_baits %>% filter(BaitingCell == "Denbarker" & Purpose == "Western Shield" & Aerial_Ground == "Ground") 
+  den.muir_twelve = twelve_baits %>% filter(BaitingCell == "Denbarker" & Purpose == "Western Shield" & Aerial_Ground == "Ground") 
+  
+  den.muir$Three = sum(den.muir_three$BaitCount)/(den.muir_area/1000000)
+  den.muir$Six = sum(den.muir_six$BaitCount)/(den.muir_area/1000000)
+  den.muir$Twelve = sum(den.muir_twelve$BaitCount)/(den.muir_area/1000000)
+  
+  den.muir_three_raster = fasterize(den.muir, ras, field="Three")
+  den.muir_six_raster = fasterize(den.muir, ras, field="Six")
+  den.muir_twelve_raster = fasterize(den.muir, ras, field="Twelve")
+  
+  # Translocations
+  ## Warrup
+  warrup_trans_area = warrup_trans %>% st_area() %>% as.numeric()
+  warrup_trans_three = three_baits %>% filter(Zone == "Warrup" & Purpose == "Translocation") 
+  warrup_trans_six = six_baits %>% filter(Zone == "Warrup" & Purpose == "Translocation") 
+  warrup_trans_twelve = twelve_baits %>% filter(Zone == "Warrup" & Purpose == "Translocation") 
+  
+  warrup_trans$Three = sum(warrup_trans_three$BaitCount)/(warrup_trans_area/1000000)
+  warrup_trans$Six = sum(warrup_trans_six$BaitCount)/(warrup_trans_area/1000000)
+  warrup_trans$Twelve = sum(warrup_trans_twelve$BaitCount)/(warrup_trans_area/1000000)
+  
+  warrup_trans_three_raster = fasterize(warrup_trans, ras, field="Three")
+  warrup_trans_six_raster = fasterize(warrup_trans, ras, field="Six")
+  warrup_trans_twelve_raster = fasterize(warrup_trans, ras, field="Twelve")
+  
+  ## Yendicup
+  yendicup_trans_area = yendicup_trans %>% st_area() %>% as.numeric()
+  yendicup_trans_three = three_baits %>% filter(Zone == "Yendicup" & Purpose == "Translocation") 
+  yendicup_trans_six = six_baits %>% filter(Zone == "Yendicup" & Purpose == "Translocation") 
+  yendicup_trans_twelve = twelve_baits %>% filter(Zone == "Yendicup" & Purpose == "Translocation") 
+  
+  yendicup_trans$Three = sum(yendicup_trans_three$BaitCount)/(yendicup_trans_area/1000000)
+  yendicup_trans$Six = sum(yendicup_trans_six$BaitCount)/(yendicup_trans_area/1000000)
+  yendicup_trans$Twelve = sum(yendicup_trans_twelve$BaitCount)/(yendicup_trans_area/1000000)
+  
+  yendicup_trans_three_raster = fasterize(yendicup_trans, ras, field="Three")
+  yendicup_trans_six_raster = fasterize(yendicup_trans, ras, field="Six")
+  yendicup_trans_twelve_raster = fasterize(yendicup_trans, ras, field="Twelve")
+  
+  ## Walcott
+  walcott_trans_area = walcott_trans %>% st_area() %>% as.numeric()
+  walcott_trans_three = three_baits %>% filter(Zone == "Walcott" & Purpose == "Translocation") 
+  walcott_trans_six = six_baits %>% filter(Zone == "Walcott" & Purpose == "Translocation") 
+  walcott_trans_twelve = twelve_baits %>% filter(Zone == "Walcott" & Purpose == "Translocation") 
+  
+  walcott_trans$Three = sum(walcott_trans_three$BaitCount)/(walcott_trans_area/1000000)
+  walcott_trans$Six = sum(walcott_trans_six$BaitCount)/(walcott_trans_area/1000000)
+  walcott_trans$Twelve = sum(walcott_trans_twelve$BaitCount)/(walcott_trans_area/1000000)
+  
+  walcott_trans_three_raster = fasterize(walcott_trans, ras, field="Three")
+  walcott_trans_six_raster = fasterize(walcott_trans, ras, field="Six")
+  walcott_trans_twelve_raster = fasterize(walcott_trans, ras, field="Twelve")
+  
+  ## Sum them up
+   sum_three = sum(manjimup_three_raster, shannon_three_raster, denbarker_three_raster, delandgraaft_three_raster,
+                   perup_three_raster, perupcore_three_raster, balban_three_raster, kingston_three_raster,
+                   balban_three_raster, camelar_three_raster, keninup_three_raster, den.muir_three_raster,
+                   walcott_trans_three_raster, yendicup_trans_three_raster, warrup_trans_three_raster, na.rm=TRUE)
+   
+   sum_six = sum(manjimup_six_raster, shannon_six_raster, denbarker_six_raster, delandgraaft_six_raster,
+                  perup_six_raster, perupcore_six_raster, balban_six_raster, kingston_six_raster,
+                  balban_six_raster, camelar_six_raster, keninup_six_raster, den.muir_six_raster,
+                  walcott_trans_six_raster, yendicup_trans_six_raster, warrup_trans_six_raster, na.rm=TRUE)
+
+  sum_twelve = sum(manjimup_twelve_raster, shannon_twelve_raster, denbarker_twelve_raster, delandgraaft_twelve_raster,
+                   perup_twelve_raster, perupcore_twelve_raster, balban_twelve_raster, kingston_twelve_raster,
+                   balban_twelve_raster, camelar_twelve_raster, keninup_twelve_raster, den.muir_twelve_raster,
+                   walcott_trans_twelve_raster, yendicup_trans_twelve_raster, warrup_trans_twelve_raster,
+                   na.rm=TRUE)
+  
+    # Extract at each sand pad
+    
+    three_extract = data.frame(Bait.Intensity.Three = raster::extract(sum_three, sand.pad.points))
+    six_extract = data.frame(Bait.Intensity.Six = raster::extract(sum_six, sand.pad.points))
+    twelve_extract = data.frame(Bait.Intensity.Twelve = raster::extract(sum_twelve, sand.pad.points))
+    
+    colnames(three_extract) = paste0(date.num,"_ThreeMonths")
+    colnames(six_extract) = paste0(date.num,"_SixMonths")
+    colnames(twelve_extract) = paste0(date.num,"_TwelveMonths")
+    
+    data = cbind(data, three_extract, six_extract, twelve_extract)
+}
+
+bait.data = data %>% tidyr::pivot_longer(-c("Site","Block"), names_to="Date_Lag", values_to='BaitingIntensity') %>%
+  tidyr::separate(Date_Lag, into = c("Date", "Lag"), sep="_") %>% mutate(Date = as.Date(Date))
+
+
+
+crs(sum_three) = "+init=epsg:28350"
+
+m = leaflet(spTransform(sand.pad.points,"+proj=longlat +datum=WGS84")) %>%
+addProviderTiles(provider="Esri.WorldImagery") %>%
+addMarkers(label=sand.pad.points$BlockCode) %>% addRasterImage(projectRaster(sum_three, crs="+proj=longlat +datum=WGS84"))
+
+
+mean.bait.data = bait.data %>% group_by(Block, Date, Lag) %>% summarise(MeanBaitingIntensity = mean(BaitingIntensity)) %>% 
+  pivot_wider(id_cols = c("Block", "Date"), names_from = "Lag", values_from = "MeanBaitingIntensity")
+
+colnames(mean.bait.data) = c("Block", "Date", "MeanBaitIntensity_Six", "MeanBaitIntensity_Three", "MeanBaitIntensity_Twelve")
+
+a = ggplot(mean.bait.data) + geom_line(aes(x=Date, y=MeanBaitIntensity_Three,colour = "Three Months")) + 
+  geom_line(aes(x=Date, y=MeanBaitIntensity_Six,colour = "Six Months")) + 
+  geom_line(aes(x=Date, y=MeanBaitIntensity_Twelve,colour = "Twelve Months")) + facet_wrap(~Block) + ylab("Mean Baiting Intensity - lag (baits/km^2)")
+a
+```
+
+
+## Rainfall
+```{r, fig.width=9, message=FALSE, warning=FALSE}
+#14.479
+############
+# RAINFALL #
+############
+
+rain.rasters = list.files("~/Dropbox/_Research/data/spatial/climate grids/rainfall", pattern=".grid", full.names = TRUE)
+rain.stack = stack(rain.rasters)
+crs(rain.stack) = "+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs"
+
+sand.pad.points.rain = spTransform(sand.pad.points, crs(rain.stack))
+
+ras.names = data.frame(names(rain.stack))
+ras.names$first = substr(ras.names$names.rain.stack., 2, 9)
+ras.names$last = substr(ras.names$names.rain.stack., 10, 17)
+ras.names$first = as.Date(ras.names$first, '%Y%m%d')
+ras.names$last = as.Date(ras.names$last, '%Y%m%d')
+ras.names$MonthYear = paste0(month(ras.names$last, label=TRUE,abbr=FALSE),"_",year(ras.names$last))
+ras.names$ID = 1:length(ras.names$MonthYear)
+
+
+dates = unique(padop$DummyDate)
+
+data = data.frame(Site = sand.pad.points$SandPadID, Block = sand.pad.points$BlockCode)
+
+start = Sys.time()
+
+for (r in 1:length(dates)){
+  MYround = as.Date(dates[r], format = '%d/%m/%y')
+  dat = ras.names[which(ras.names$last >= MYround & ras.names$first <= MYround),]
+  n = as.numeric(dat$ID)
+  newstack_3 = subset(rain.stack, (n-3):(n-1))
+  sumras_3 = sum(newstack_3)
+  newstack_6 = subset(rain.stack, (n-6):(n-1))
+  sumras_6 = sum(newstack_6)
+  newstack_12 = subset(rain.stack, (n-12):(n-1))
+  sumras_12 = sum(newstack_12)
+
+  mean_3 = data.frame(raster::extract(sumras_3, sand.pad.points.rain, fun=function(x, na.rm=TRUE) mean(x)))
+  mean_6 = data.frame(raster::extract(sumras_6, sand.pad.points.rain, fun=function(x, na.rm=TRUE) mean(x)))
+  mean_12 = data.frame(raster::extract(sumras_12, sand.pad.points.rain, fun=function(x, na.rm=TRUE) mean(x)))
+
+  colnames(mean_3) = paste0(MYround,"_ThreeMonths")
+  colnames(mean_6) = paste0(MYround,"_SixMonths")
+  colnames(mean_12) = paste0(MYround,"_TwelveMonths")
+
+  data = cbind(data, mean_3, mean_6, mean_12)
+  }
+
+total = Sys.time() - start
+total
+
+rain.data = data %>% tidyr::pivot_longer(-c("Site","Block"), names_to="Round_Lag", values_to='Rainfall') %>%
+tidyr::separate(Round_Lag, c("Date", "Lag"), sep="_") %>% mutate(Date = as.Date(Date)) 
+
+
+mean.rain.data = rain.data %>% group_by(Block, Date, Lag) %>% summarise(MeanRainfall = mean(Rainfall)) %>% 
+  pivot_wider(id_cols = c("Block", "Date"), names_from = "Lag", values_from = "MeanRainfall")
+
+colnames(mean.rain.data) = c("Block", "Date", "MeanRainfall_Six", "MeanRainfall_Three", "MeanRainfall_Twelve")
+
+a = ggplot(mean.rain.data) + geom_line(aes(x=Date, y=MeanRainfall_Three,colour = "Three Months")) + 
+  geom_line(aes(x=Date, y=MeanRainfall_Six,colour = "Six Months")) + 
+  geom_line(aes(x=Date, y=MeanRainfall_Twelve,colour = "Twelve Months")) + facet_wrap(~Block) + ylab("Mean Rainfall - lag (mm)")
+a
+
+
+# Link to Session ID
+padop.clean = padop %>% dplyr::select(TransectID, Transect, Block, Session, Start, DummyDate) %>% mutate(Date = as.Date(DummyDate, format ="%d/%m/%y"))
+
+bait.pads = left_join(padop.clean, mean.bait.data, by = c("TransectID" = "Block", "Date"))
+
+
+```
+
+## Distance to agricultural land (Plantations and Cleared Land)
+```{r, message=FALSE, warning=FALSE}
+# Distance to Agriculture (Plantations and Cleared land)
+disturbed.small = read_sf("~/Dropbox/_Research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Spatial data/Covariates/disturbed.small.projectarea.shp")
+disturbed.small = disturbed.small %>% st_transform(st_crs(20350))
+sand.pad.points = sand.pad.points %>% st_as_sf() 
+st_crs(sand.pad.points) = 20350
+
+distances = st_distance(sand.pad.points, disturbed.small)
+sand.pad.points$distances = apply(distances, 1, FUN=min)
+DistAg = data.frame(sand.pad.points$SandPadID, sand.pad.points$distances)
+
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+bait.wide = pivot_wider(bait.data, id_cols = c("Site", "Block", "Date"), names_from = "Lag", values_from = "BaitingIntensity")
+bait.wide = left_join(bait.wide, padop.clean, by = c("Block" = "TransectID","Date"))
+bait.wide = bait.wide %>% drop_na(DummyDate) 
+colnames(bait.wide) = c("Site", "Block", "Date", "Bait_ThreeMonths","Bait_SixMonths","Bait_TwelveMonths","Transect","SurveyBlock","Session","Start","DummyDate")
+
+rain.wide = pivot_wider(rain.data, id_cols = c("Site", "Block", "Date"), names_from = "Lag", values_from = "Rainfall")
+rain.wide = left_join(rain.wide, padop.clean, by = c("Block" = "TransectID", "Date"))
+rain.wide = rain.wide %>% drop_na(DummyDate)
+colnames(rain.wide) = c("Site", "Block", "Date", "Rain_ThreeMonths","Rain_SixMonths","Rain_TwelveMonths","Transect","SurveyBlock","Session","Start","DummyDate")
+
+```
+
+## Example map of baiting intensity
+This map is an example of the baiting intensity layers generated. This shows an example intensity in previous three months. Blue is high intensity, red is low intensity. The points are the sand pads. 
+```{r, fig.width=9, message=FALSE, warning=FALSE}
+# Example baiting intensity plot
+m = leaflet(st_transform(sand.pad.points,"+proj=longlat +datum=WGS84")) %>%
+addProviderTiles(provider="Esri.WorldImagery") %>%
+addMarkers(label=sand.pad.points$BlockCode) %>% addRasterImage(projectRaster(sum_three, crs="+proj=longlat +datum=WGS84"), opacity = 0.4) 
+m
+```
+
+## Prey covariate
+```{r message=FALSE, warning=FALSE}
+# Read in the data files
+trap_data = read.csv("~/Dropbox/Billy/_Research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Mammal data/FF_allSpeciesData_SurveySites_190225.csv")
+extra_trap_data = read.csv("~/Dropbox/Billy/_Research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Mammal data/FF_allSpeciesData_SurveySitesExtra_190227.csv", header=TRUE, check.names = FALSE)
+daily_effort = read.csv("~/Dropbox/Billy/_Research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Mammal data/DailyTrapEffort_10022020.csv")
+session_effort = read.csv("~/Dropbox/Billy/_Research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Mammal data/SessionTrapEffort_11022020.csv")
+
+# Join the transect data from the original Upper Warren area (in Wayne et al. 2017), plus the extra data from nearby transects. 
+all_trap_data = rbind(trap_data, extra_trap_data)
+
+# Select the transects we want to look at (n = 12), chosen in conversation with Adrian Wayne and Marike Maxwell, Feb 2019
+# Full data: Keninup, Warrup, Balban (Universal), Camelar, Boyicup, Moopinup, Chariup, Winnejup, Corbal
+# Extra data: Tone, Poorginup & Dorgedup
+transects = c("51KEN/01", "51POS/01", "51BOY/01", "51CHP/01", "51FMC/01","51COR/01",  "51WAR/01", "WEB", "WNB", 
+              "51FMC/02", "51CUP/01", "51DRG/01", "51MYA/01") 
+
+prey = c("Woylie", "Chuditch", "Quenda", "Common Brushtail Possum", "Western Ringtail Possum", "House Mouse", "Tammaer Wallaby (WA subsp)", "Western Bush Rat", "Brush-tailed Phascogale (SW subsp)", "Black Rat", "Numbat", "Western Bluetongue", "Southern Brush-tailed Phascogale", "Bobtail", "Mardo") 
+
+my_trap_data = all_trap_data %>% filter(VERNACULAR %in% prey) %>% # Select species of interes
+  filter(CAPTURE_CODE != "NT") %>% # Remove the individuals that weren't tagged. Per discussion with Marike Maxwell
+  filter(SSI_LABEL %in% transects) %>% # Grab the transects we want to look at (as agreed with AW and MM)
+  mutate(TRP_DATE = as.Date(TRP_DATE, format = "%d/%m/%y")) %>% # Convert date data to actual dates that we can filter by
+  filter(TRP_DATE >"2000-01-01" & TRP_DATE < "2020-12-31") %>% #Select the dates that we want (i.e. 2000-2019)
+  mutate(YEAR = year(TRP_DATE)) %>%
+  # Assign Trap Rounds based on Month and Year. 
+  # Need to check if trapping went across months during a season. It needs to match the Summary Spreadsheet
+  # Might need to make it seasonal.. Seaons don't quite match though... 
+  mutate(TRP_ROUND = paste0(months(TRP_DATE),"_",YEAR)) %>% # Assign based on Month. Need to check where session went across different months
+                             mutate(TRANSECT = ifelse(SSI_LABEL == "51KEN/01", "Keninup",  # Create a new column with actual transect names, to combine WEB and WNB etc
+                                                      ifelse(SSI_LABEL == "51POS/01", "Moopinup",
+                                                      ifelse(SSI_LABEL == "51BOY/01", "Boyicup",
+                                                      ifelse(SSI_LABEL == "51CHP/01", "Chariup",
+                                                      ifelse(SSI_LABEL == "51FMC/01", "Camelar",
+                                                      ifelse(SSI_LABEL == "51COR/01", "Corbal",
+                                                      ifelse(SSI_LABEL == "51WAR/01", "Warrup",
+                                                      ifelse(SSI_LABEL == "WEB", "Winnejup",
+                                                      ifelse(SSI_LABEL == "WNB", "Winnejup",
+                                                      ifelse(SSI_LABEL == "51FMC/02", "Balban",
+                                                      ifelse(SSI_LABEL == "51CUP/01", "Tone",
+                                                      ifelse(SSI_LABEL == "51DRG/01", "Dordagup",
+                                                      ifelse(SSI_LABEL == "51MYA/01", "Porginup", NA
+                                                      )))))))))))))) %>%
+  mutate(SurveyID = paste0(SSI_LABEL, "_",TRP_ROUND)) %>%
+  mutate(TRP_NUMBER = as.numeric(gsub("\\D", "", SPT_LABEL))) %>% # Extract just the numbers for each trap on each transect.
+  droplevels() %>%
+  dplyr::filter(TRANSECT %in% c('Keninup', 'Moopinup', 'Boyicup', 'Balban', 'Warrup', 'Winnejup'))
+
+#####
+trap_effort = read.csv("~/Dropbox/Billy/_Research/_PhD/07_UpperWarren_WA/data/from Adrian Feb19/Mammal data/trapeffortUW_190228.csv")
+
+VERNACULAR = unique(my_trap_data$VERNACULAR)
+
+# Fill weird gaps in the data and expand so that we record zeros as seperate to NAs if species wasn't detected at a site
+trap_effort = trap_effort %>% 
+  mutate(TRAP_START = as.Date(as.character(SUS_START), format = "%d/%m/%y"), 
+         TRAP_FINISH = as.Date(as.character(SUS_FINISH),format = "%d/%m/%y")) %>% 
+  mutate(TRP_ROUND = ifelse(TRP_ROUND == "", "March_2014", as.character(TRP_ROUND))) %>%
+  mutate(SurveyID = paste0(SSI_LABEL, "_",TRP_ROUND)) %>% crossing(VERNACULAR) %>% drop_na()
+
+#### Step 1: Calculate the number of captures for each species at each transect, per trap round (i.e. year and month)
+captures_count = my_trap_data %>% 
+  group_by(TRANSECT, YEAR, TRP_ROUND,SurveyID, VERNACULAR) %>% 
+  summarise(CAPTURE_COUNT = n()) 
+
+# Merge capture count with trap effort so we can calculate capture rates
+counts = merge(trap_effort, captures_count, all.x=TRUE)
+
+# Remove the ones with N (i.e. the ones we've decided to not count in the analysis) 
+# Set the NAs to zero (i.e. no captures for that species at that survey round)
+# Rename the transects again and grab the year value for the survey. 
+counts = counts %>% filter(Include != "N") %>% 
+  mutate(CAPTURE_COUNT = ifelse(is.na(CAPTURE_COUNT) == TRUE, 0, CAPTURE_COUNT)) %>%
+  mutate(TRANSECT = ifelse(SSI_LABEL == "51KEN/01", "Keninup",  
+                           ifelse(SSI_LABEL == "51POS/01", "Moopinup",
+                                  ifelse(SSI_LABEL == "51BOY/01", "Boyicup",
+                                         ifelse(SSI_LABEL == "51CHP/01", "Chariup",
+                                                ifelse(SSI_LABEL == "51FMC/01", "Camelar",
+                                                       ifelse(SSI_LABEL == "51COR/01", "Corbal",
+                                                              ifelse(SSI_LABEL == "51WAR/01", "Warrup",
+                                                                     ifelse(SSI_LABEL == "WEB", "Winnejup",
+                                                                            ifelse(SSI_LABEL == "WNB", "Winnejup",
+                                                                                   ifelse(SSI_LABEL == "51FMC/02", "Balban",
+                                                                                          ifelse(SSI_LABEL == "51CUP/01", "Tone",
+                                                                                                 ifelse(SSI_LABEL == "51DRG/01", "Dorgedup",
+                                                                                                        ifelse(SSI_LABEL == "51MYA/01", "Porginup", NA
+                                                                                                        )))))))))))))) %>%
+  mutate(YEAR = as.numeric(gsub("\\D", "", TRP_ROUND))) %>%
+  dplyr::filter(TRANSECT %in% c('Keninup', 'Moopinup', 'Boyicup', 'Balban', 'Warrup', 'Winnejup'))
+
+  
+
+
+#### Step 2: Calculate capture reate (Count/sampling effort at each transect, per trap round (i.e. year and month))
+# Make sure to also get the start and end date of each trapping session to help verify effort..
+cap.rate_round = counts %>% mutate(CAP_RATE = CAPTURE_COUNT/EFFORT) %>%
+  dplyr::select(TRP_ROUND, SurveyID,TRANSECT,YEAR,TRAP_START, TRAP_FINISH, VERNACULAR, 
+         SSI_LABEL, EFFORT, CAPTURE_COUNT, CAP_RATE) %>%
+    filter(TRAP_START >"2005-01-01" & TRAP_START < "2013-12-31") #Select the dates that we want (i.e. 2000-2019)
+
+prey.cap.rate = cap.rate_round %>% 
+  group_by(TRP_ROUND, TRANSECT, TRAP_START, EFFORT) %>% 
+  summarise(Total_Count = sum(CAPTURE_COUNT), Total_CapRate = sum(CAP_RATE))
+
+#ggplot(prey.cap.rate) + geom_line(aes(x = TRAP_START, y = Total_CapRate)) + facet_wrap(~TRANSECT)
+
+##############
+dates = unique(padop$DummyDate)
+
+data.out = data.frame()
+for (d in 1:length(dates)){
+    date.num = as.Date(dates[d], format= "%d/%m/%y")
+  
+    three_prey = prey.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(3))) %>%
+      mutate(SandPadDate = date.num, Lag = "Three") # Surveys in previous 3 months
+    six_prey= prey.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(6))) %>%
+      mutate(SandPadDate = date.num, Lag = "Six")   # Surveys in previous 6 months
+    twelve_prey = prey.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(12))) %>%
+      mutate(SandPadDate = date.num, Lag = "Twelve")   # Surveys in previous 12 months
+
+    prey.data = data.frame(rbind(three_prey, six_prey, twelve_prey))
+    
+    data.out = rbind(data.out, prey.data)
+
+}
+
+prey.lag.data = data.out %>% group_by(TRANSECT, SandPadDate, Lag) %>% summarise(Surveys = n(), MeanCapRate = mean(Total_CapRate)) 
+
+prey.lag.data = prey.lag.data %>% pivot_wider(id_cols = c(TRANSECT, SandPadDate), names_from = Lag, values_from  = MeanCapRate)
+
+prey.twelve = prey.lag.data %>% drop_na(Twelve) %>% mutate(Transect = as.factor(TRANSECT), 
+                                                           DateNumeric = as.numeric(SandPadDate))
+
+m = mgcv::gam(Twelve ~ s(DateNumeric, by=as.factor(Transect), k = 11) + Transect, data = prey.twelve)
+
+
+nd = data.frame(DateNumeric = as.numeric(padop.clean$Date), Transect = padop.clean$Transect)
+
+pred = predict(m, newdata=nd, se.fit=TRUE)
+pred = cbind(nd, pred)
+
+a = ggplot() + 
+  geom_ribbon(data = pred, aes(x = DateNumeric, ymin = fit-se.fit*1.96, ymax = fit+se.fit*1.96), alpha=0.4) + 
+  geom_line(data = pred, aes(x = DateNumeric, y = fit)) + 
+  geom_point(data=prey.twelve, aes(x = DateNumeric, y = Twelve)) + 
+  facet_wrap(~TRANSECT)
+
+pred$Date = as.Date(pred$DateNumeric, origin=lubridate::origin)
+pred$Twelve = pred$fit
+
+prey.pads = left_join(padop.clean, pred, by = c("Transect", "Date"))
+
+
+a = ggplot() + geom_ribbon(data = prey.pads, aes(x = Date, ymin = fit-se.fit*1.96, ymax=fit+se.fit*1.96), alpha=0.4) +
+  geom_line(data = prey.pads, aes(x = Date, y = Twelve)) +
+  geom_point(data=prey.twelve, aes(x = as.Date(DateNumeric, origin=lubridate::origin), y = Twelve)) +
+  ggtitle("Mean Prey Capture Rate in Prv Twelve Months") +
+  facet_wrap(~Transect)+ theme_classic() 
+
+prey.pads = dplyr::select(prey.pads, c(TransectID,Session,Prey_Twelve = Twelve))
+
+## Woylie-only Capture Rate lags
+woylie.cap.rate_round = counts %>% filter(VERNACULAR == "Woylie") %>%
+  mutate(CAP_RATE = CAPTURE_COUNT/EFFORT) %>%
+  dplyr::select(TRP_ROUND, SurveyID,TRANSECT,YEAR,TRAP_START, TRAP_FINISH, VERNACULAR, 
+         SSI_LABEL, EFFORT, CAPTURE_COUNT, CAP_RATE) %>%
+    filter(TRAP_START >"2005-01-01" & TRAP_START < "2013-12-31") #Select the dates that we want (i.e. 2000-2019)
+
+woylie.cap.rate = woylie.cap.rate_round %>% 
+  group_by(TRP_ROUND, TRANSECT, TRAP_START, EFFORT) %>% 
+  summarise(Total_Count = sum(CAPTURE_COUNT), Total_CapRate = sum(CAP_RATE))
+
+#ggplot(woylie.cap.rate) + geom_point(aes(x = TRAP_START, y = Total_CapRate)) + facet_wrap(~TRANSECT)
+
+dates = unique(padop$DummyDate)
+
+data.out = data.frame()
+for (d in 1:length(dates)){
+    date.num = as.Date(dates[d], format= "%d/%m/%y")
+  
+    three_prey = woylie.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(3))) %>%
+      mutate(SandPadDate = date.num, Lag = "Three") # Surveys in previous 3 months
+    six_prey= woylie.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(6))) %>%
+      mutate(SandPadDate = date.num, Lag = "Six")   # Surveys in previous 6 months
+    twelve_prey = woylie.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(12))) %>%
+      mutate(SandPadDate = date.num, Lag = "Twelve")   # Surveys in previous 12 months
+
+    woylie.data = data.frame(rbind(three_prey, six_prey, twelve_prey))
+    
+    data.out = rbind(data.out, woylie.data)
+
+}
+
+woylie.lag.data = data.out %>% group_by(TRANSECT, SandPadDate, Lag) %>% summarise(Surveys = n(), MeanCapRate = mean(Total_CapRate)) 
+
+woylie.lag.data = woylie.lag.data %>% pivot_wider(id_cols = c(TRANSECT, SandPadDate), names_from = Lag, values_from  = MeanCapRate)
+
+woylie.twelve = woylie.lag.data %>% drop_na(Twelve) %>% mutate(Transect= as.factor(TRANSECT), 
+                                                           DateNumeric = as.numeric(SandPadDate))
+
+
+m.woy = mgcv::gam(Twelve ~ s(DateNumeric, by=as.factor(Transect), k=9) + Transect, data = woylie.twelve)
+
+nd = data.frame(DateNumeric = as.numeric(padop.clean$Date), Transect = padop.clean$Transect)
+
+pred = predict(m.woy, newdata=nd, se.fit=TRUE)
+pred = cbind(nd, pred)
+
+pred$Date = as.Date(pred$DateNumeric, origin=lubridate::origin)
+pred$Twelve = pred$fit
+
+woylie.pads = left_join(padop.clean, pred, by = c("Transect", "Date"))
+
+b = ggplot() + geom_ribbon(data = woylie.pads, aes(x = Date, ymin = fit-se.fit*1.96, ymax=fit+se.fit*1.96), alpha=0.4) +
+  geom_line(data = woylie.pads, aes(x = Date, y = Twelve)) +
+  geom_point(data=woylie.twelve, aes(x = as.Date(DateNumeric, origin=lubridate::origin), y = Twelve)) +
+  ggtitle("Mean Woylie Capture Rate in Prv Twelve Months") +
+  facet_wrap(~Transect)+ theme_classic() 
+
+# Prey without woylies
+no.woylie.cap.rate_round = counts %>% filter(VERNACULAR != "Woylie") %>%
+  mutate(CAP_RATE = CAPTURE_COUNT/EFFORT) %>%
+  dplyr::select(TRP_ROUND, SurveyID,TRANSECT,YEAR,TRAP_START, TRAP_FINISH, VERNACULAR, 
+         SSI_LABEL, EFFORT, CAPTURE_COUNT, CAP_RATE) %>%
+    filter(TRAP_START >"2005-01-01" & TRAP_START < "2013-12-31") #Select the dates that we want (i.e. 2000-2019)
+
+no.woylie.cap.rate = no.woylie.cap.rate_round %>% 
+  group_by(TRP_ROUND, TRANSECT, TRAP_START, EFFORT) %>% 
+  summarise(Total_Count = sum(CAPTURE_COUNT), Total_CapRate = sum(CAP_RATE))
+
+#ggplot(no.woylie.cap.rate) + geom_point(aes(x = TRAP_START, y = Total_CapRate)) + facet_wrap(~TRANSECT)
+
+dates = unique(padop$DummyDate)
+
+data.out = data.frame()
+for (d in 1:length(dates)){
+    date.num = as.Date(dates[d], format= "%d/%m/%y")
+  
+    three_prey = no.woylie.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(3))) %>%
+      mutate(SandPadDate = date.num, Lag = "Three") # Surveys in previous 3 months
+    six_prey= no.woylie.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(6))) %>%
+      mutate(SandPadDate = date.num, Lag = "Six")   # Surveys in previous 6 months
+    twelve_prey = no.woylie.cap.rate %>% filter(TRAP_START < date.num  & TRAP_START > (date.num %m-% months(12))) %>%
+      mutate(SandPadDate = date.num, Lag = "Twelve")   # Surveys in previous 12 months
+
+    no.woylie.data = data.frame(rbind(three_prey, six_prey, twelve_prey))
+    
+    data.out = rbind(data.out, no.woylie.data)
+
+}
+
+no.woylie.lag.data = data.out %>% group_by(TRANSECT, SandPadDate, Lag) %>% summarise(Surveys = n(), MeanCapRate = mean(Total_CapRate)) 
+
+no.woylie.lag.data = no.woylie.lag.data %>% pivot_wider(id_cols = c(TRANSECT, SandPadDate), names_from = Lag, values_from  = MeanCapRate)
+
+no.woylie.twelve = no.woylie.lag.data %>% drop_na(Twelve) %>% mutate(Transect= as.factor(TRANSECT), 
+                                                           DateNumeric = as.numeric(SandPadDate))
+
+
+m.woy = mgcv::gam(Twelve ~ s(DateNumeric, by=as.factor(Transect), k=4) + Transect, data = no.woylie.twelve)
+
+nd = data.frame(DateNumeric = as.numeric(padop.clean$Date), Transect = padop.clean$Transect)
+
+pred = predict(m.woy, newdata=nd, se.fit=TRUE)
+pred = cbind(nd, pred)
+
+pred$Date = as.Date(pred$DateNumeric, origin=lubridate::origin)
+pred$Twelve = pred$fit
+
+no.woylie.pads = left_join(padop.clean, pred, by = c("Transect", "Date"))
+
+c = ggplot() + geom_ribbon(data = no.woylie.pads, aes(x = Date, ymin = fit-se.fit*1.96, ymax=fit+se.fit*1.96), alpha=0.4) +
+  geom_line(data = no.woylie.pads, aes(x = Date, y = Twelve)) +
+  geom_point(data=no.woylie.twelve, aes(x = as.Date(DateNumeric, origin=lubridate::origin), y = Twelve)) +
+  ggtitle("Mean Prey (ex. Woylie) Capture Rate in Prv Twelve Months") +
+  facet_wrap(~Transect)+ theme_classic() 
+```
+
+## K-fold cross validation to check predictions of prey data
+```{r}
+## K-fold cross validation to make sure the model is predicting well
+# Code modified from here: https://stackoverflow.com/questions/54260087/vectorizing-a-for-loop-for-cross-validation-in-r
+iterations = 100
+data.out = data.frame()
+
+for (t in 1:iterations){
+  run = t
+  
+  # k - fold cross validation
+  df = data.frame(prey.twelve)
+  df = df[sample(nrow(df)),]
+  k = 10 # how many folds
+  folds = cut(seq(from=1, to=nrow(df)), breaks=k, labels = FALSE) # breaks the data into the folds
+  df$ID <- folds
+  df[paste("pred1")] <- NA
+  
+  for(i in 1:k){
+        # looping for a model for each fold   
+        m = mgcv::gam(Twelve ~ s(DateNumeric, by=as.factor(TRANSECT), k = 11) + TRANSECT, data = df, subset=(ID != i))
+        
+        # looping for predictions using the model of each fold:
+        df[df$ID==i, "pred1"] <- predict(m, df[df$ID==i, ], type="response") 
+  }
+  # calculating residuals:
+  df$res1 <- with(df, Twelve - pred1)
+      
+  # Bring together the variables we want
+  Model <- paste("m")
+  R2 = summary(m)$r.sq
+  MSE <- with(df, c(sum(res1^2) / nrow(df)))
+  model.mse <- data.frame(Iteration = run, Model, MSE, R2) # creates a data frame of model names, mean-square errors and coefficients of determination.
+     
+  # Collect across runs
+  data.out = rbind(data.out, model.mse)
+}
+
+standard_error <- function(x) {sd(x) / sqrt(length(x))}
+
+mean(data.out$MSE)
+standard_error(data.out$MSE)
+
+mean(data.out$R2)
+standard_error(data.out$R2)
+
+```
+
+## Plot of capture rates to see which spp are driving the variation
+```{r message=FALSE, warning=FALSE}
+a
+b
+c
+```
+
+## Load the covariates into the matrix
+Also show a plot of when each transect was surveyed, so can see the variable survey effort. 
+
+```{r}
+site.session = data.frame(foxes.dethist[,1:2])
+site.session$Session = as.numeric(site.session$Session)
+padop.clean$Session = as.numeric(padop.clean$Session)
+bait.pads$Session = as.numeric(bait.pads$Session)
+bait.wide$Session = as.numeric(bait.wide$Session)
+rain.wide$Session = as.numeric(rain.wide$Session)
+
+prey.pads$Session = as.numeric(prey.pads$Session)
+
+
+bait.means = data.frame(TransectID = bait.pads$TransectID,
+                        Session = bait.pads$Session,
+                        MeanBaitIntensity_Three = bait.pads$MeanBaitIntensity_Three,
+                        MeanBaitIntensity_Six = bait.pads$MeanBaitIntensity_Six,
+                        MeanBaitIntensity_Twelve = bait.pads$MeanBaitIntensity_Twelve)
+
+covariates = site.session
+covariates = left_join(covariates, lookup, by =c("Site"= "SandPadID"))
+covariates= left_join(covariates, bait.wide, by = c("BlockCode"="Block","Site", "Session"))
+covariates = left_join(covariates, bait.means, by = c("BlockCode"="TransectID","Session"))
+covariates= left_join(covariates, rain.wide, by = c("BlockCode"="Block","Site", "Session","Date","Transect","SurveyBlock","Start","DummyDate"))
+covariates = left_join(covariates, prey.pads, by = c("BlockCode"="TransectID","Session"))
+covariates = left_join(covariates, DistAg, by=c("Site"="sand.pad.points.SandPadID"))
+
+covariates = covariates %>% dplyr::select(Site,Transect, BlockCode,Easting,Northing,Session,Date,Bait_ThreeMonths,
+                                          Bait_SixMonths,Bait_TwelveMonths,MeanBaitIntensity_Three,MeanBaitIntensity_Six,
+                                          MeanBaitIntensity_Twelve, Rain_ThreeMonths,Rain_SixMonths,Rain_TwelveMonths,
+                                          Prey_Twelve,DistAg = sand.pad.points.distances)
+```
+
+
+```{r message=FALSE, echo=TRUE, warning=FALSE, paged.print=TRUE, fig.width=9}
+# Quick plot to visualise when each transect was surveyed--shows the uneven survey effort
+padop.clean$Surveyed = as.factor(ifelse(is.na(padop.clean$Start), "No", "Yes"))
+ggplot(padop.clean) + geom_tile(aes(x = as.factor(Session), y = Transect, fill=Surveyed)) + xlab("Session") + ggtitle("Survey effort across sessions")
+
+```
+
+## Check for coliniarity between covariates
+Dont want to include variables that have a correlation of more than +/-0.5, which looks like we're all good. 
+```{r, message=FALSE, warning=FALSE, fig.width=9}
+cors = cor(covariates[,8:18],
+           method = "spearman")
+
+corrplot::corrplot(cors, method='number')
+```
+
+## Create the unmarked occupancy frames
+```{r, message=FALSE, echo=FALSE, warning=FALSE, paged.print=TRUE}
+foxes.dethist = data.frame(foxes.dethist)
+foxes.dethist[3:14] = sapply(foxes.dethist[3:14],as.numeric)
+
+foxes.umf = unmarked::unmarkedFrameOccu(y = foxes.dethist[,3:14],
+                                        siteCovs = covariates[,1:18])
+
+summary(foxes.umf)
+
+save(foxes.umf, file="Data_Clean/foxes.umf.16092021.Rda")
+
+cats.dethist = data.frame(cats.dethist)
+cats.dethist[3:14] = sapply(cats.dethist[3:14],as.numeric)
+cats.umf = unmarked::unmarkedFrameOccu(y = cats.dethist[,3:14],
+                                        siteCovs = covariates[,1:18])
+
+save(cats.umf, file="Data_Clean/cats.umf.16092021.Rda")
+summary(cats.umf)
+```
+
+
